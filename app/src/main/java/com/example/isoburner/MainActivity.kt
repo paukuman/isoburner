@@ -46,11 +46,11 @@ class MainActivity : AppCompatActivity() {
         val btnPick = Button(this).apply { text = "Pilih file ISO" }
         modeGroup = RadioGroup(this).apply {
             addView(RadioButton(context).apply { text = "Linux (raw/dd)"; id = 1; isChecked = true })
-            addView(RadioButton(context).apply { text = "Windows (belum jadi)"; id = 2 })
+            addView(RadioButton(context).apply { text = "Windows (tahap 1: format FAT32 saja)"; id = 2 })
         }
-        val btnStart = Button(this).apply { text = "Tulis ke USB" }
+        val btnStart = Button(this).apply { text = "Mulai" }
         progress = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100 }
-        status = TextView(this).apply { text = "Colok flashdisk via OTG, pilih ISO, lalu Tulis." }
+        status = TextView(this).apply { text = "Colok flashdisk via OTG, pilih mode, lalu Mulai." }
 
         listOf(btnPick, modeGroup, btnStart, progress, status).forEach {
             root.addView(it, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
@@ -72,8 +72,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun log(msg: String) = runOnUiThread { status.text = msg }
 
+    private fun isWindowsMode() = modeGroup.checkedRadioButtonId == 2
+
     private fun start() {
-        if (isoUri == null) { log("Pilih ISO dulu"); return }
+        if (!isWindowsMode() && isoUri == null) { log("Pilih ISO dulu"); return }
         val devices = UsbMassStorageDevice.getMassStorageDevices(this)
         if (devices.isEmpty()) { log("Flashdisk tidak terdeteksi (cek OTG)"); return }
 
@@ -107,24 +109,47 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun runWrite(dev: UsbMassStorageDevice) {
-        val uri = isoUri ?: return
-        val windows = modeGroup.checkedRadioButtonId == 2
+        val windows = isWindowsMode()
+        val uri = isoUri
         Thread {
             try {
-                log("Menulis...")
-                contentResolver.openInputStream(uri)!!.use { input ->
-                    val cb = { done: Long, total: Long ->
-                        runOnUiThread {
-                            progress.progress = if (total > 0) (done * 100 / total).toInt() else 0
+                if (windows) {
+                    log("Mulai format...")
+                    WindowsInstaller.format(dev) { log(it) }
+                    verifyFat32()
+                } else {
+                    log("Menulis...")
+                    contentResolver.openInputStream(uri!!)!!.use { input ->
+                        RawWriter.write(dev, input, isoSize) { done, total ->
+                            runOnUiThread {
+                                progress.progress = if (total > 0) (done * 100 / total).toInt() else 0
+                            }
                         }
                     }
-                    if (windows) WindowsInstaller.install(dev, input, cb)
-                    else RawWriter.write(dev, input, isoSize, cb)
+                    log("Selesai. Aman dicabut.")
                 }
-                log("Selesai. Aman dicabut.")
             } catch (e: Throwable) {
                 log("Gagal: ${e.message}")
             }
         }.start()
+    }
+
+    /** Init ulang flashdisk dan baca lewat parser FAT32 libaums sebagai pemeriksaan. */
+    private fun verifyFat32() {
+        val d = UsbMassStorageDevice.getMassStorageDevices(this).firstOrNull()
+        if (d == null) {
+            log("Format selesai, tapi flashdisk tidak terdeteksi ulang. Cabut-colok lalu cek di file manager.")
+            return
+        }
+        try {
+            d.init()
+            val fs = d.partitions[0].fileSystem
+            log(
+                "Format OK. Kapasitas ${fs.capacity / 1048576} MiB, bebas ${fs.freeSpace / 1048576} MiB.\n" +
+                    "Cabut-colok lalu cek juga di PC/file manager."
+            )
+        } finally {
+            try { d.close() } catch (_: Exception) {}
+        }
     }
 }
